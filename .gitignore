@@ -1,0 +1,19 @@
+﻿# Node/Angular
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/cache/
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/.mypy_cache/
+backend/.pytest_cache/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env
+.env
