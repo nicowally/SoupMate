@@ -2,14 +2,16 @@
 import { NgIf } from '@angular/common';
 import { ApiService } from '../../services/api.service';
 
+// @ts-ignore
+
 @Component({
   selector: 'app-home',
   standalone: true,
   imports: [NgIf],
   template: `
     <h1>SoupMate</h1>
-    <p *ngIf="msg()">{{ msg() }}</p>
-  `
+    <button (click)="check()">Health Check</button>
+    <p *ngIf="msg()">{{ msg() }}</p>`
 })
 export class HomeComponent {
   msg = signal<string>('');
