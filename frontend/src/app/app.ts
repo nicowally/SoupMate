@@ -9,7 +9,7 @@ import {HomeComponent} from './pages/home/home.component';
   standalone: true,
   templateUrl: './app.html',
   styleUrls: ['./app.css'],
-  imports: [RouterOutlet, HeaderComponent, SidenavComponent, SidenavComponent, HomeComponent]
+  imports: [RouterOutlet, HeaderComponent, SidenavComponent, HomeComponent]
 })
 export class App {
   protected readonly title: WritableSignal<string> = signal('frontend');
