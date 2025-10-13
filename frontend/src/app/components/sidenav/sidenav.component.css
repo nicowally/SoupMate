@@ -1,0 +1,39 @@
+.sidenav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 240px;
+  height: 100vh;
+  background-color: #f8cfae;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: flex-start;
+  padding-top: 80px;
+  box-shadow: 2px 0 6px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+}
+
+.sidenav ul {
+  list-style: none;
+  padding: 0;
+  width: 100%;
+}
+
+.sidenav li {
+  width: 100%;
+}
+
+.sidenav a {
+  display: block;
+  padding: 15px 25px;
+  color: #4a2e00;
+  text-decoration: none;
+  font-weight: 600;
+  font-family: 'Nunito', sans-serif;
+  transition: background-color 0.3s ease;
+}
+
+.sidenav a:hover {
+  background-color: #f6b989;
+}
