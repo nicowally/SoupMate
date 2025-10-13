@@ -1,0 +1,27 @@
+.layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Sidebar bleibt fix links */
+app-sidenav {
+  width: 240px;
+  flex-shrink: 0;
+  height: 100%;
+}
+
+/* Hauptinhalt rechts daneben */
+.main-content {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background-color: #fff8f0; /* leicht beige Hintergrundfarbe */
+}
+
+/* Damit der Header nicht am Rand klebt */
+app-header {
+  flex-shrink: 0;
+}

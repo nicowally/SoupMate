@@ -2,7 +2,6 @@
 import { NgIf } from '@angular/common';
 import { ApiService } from '../../services/api.service';
 
-// @ts-ignore
 @Component({
   selector: 'app-home',
   standalone: true,
