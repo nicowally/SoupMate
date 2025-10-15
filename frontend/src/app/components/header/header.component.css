@@ -71,5 +71,21 @@
   display: inline-block;
 }
 
+.account-icon-container {
+  position: absolute;
+  top: 25px;
+  right: 25px;
+}
+
+.account-icon {
+  width: 50px;  /* Größe des Account-Bildes */
+  height: 50px;
+  object-fit: contain;
+  cursor: pointer;
+}
+
+.account-icon:hover {
+  opacity: 0.8;  /* Effekt bei Hover, wenn du möchtest */
+}
 
 
