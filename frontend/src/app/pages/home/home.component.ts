@@ -1,13 +1,15 @@
 ﻿import { Component, signal } from '@angular/core';
 import { NgIf } from '@angular/common';
 import { ApiService } from '../../services/api.service';
+import { SearchbarComponent } from '../../components/searchbar/searchbar.component';
+
 
 // @ts-ignore
 
 @Component({
   selector: 'app-home',
   standalone: true,
-  imports: [NgIf],
+  imports: [NgIf, SearchbarComponent],
   template: `
     <h1>SoupMate</h1>
     <button (click)="check()">Health Check</button>

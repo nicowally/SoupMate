@@ -1,0 +1,13 @@
+<div class="search-container">
+  <input
+    type="text"
+    placeholder="Ask SoupMate..."
+    [(ngModel)]="query"
+    (keyup.enter)="onSearch()"
+  />
+  <button (click)="onSearch()">Search</button>
+</div>
+
+<div *ngIf="answer" class="answer-box">
+  <p>{{ answer }}</p>
+</div>
