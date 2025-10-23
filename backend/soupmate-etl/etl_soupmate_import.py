@@ -3,30 +3,87 @@
 # & "C:\Users\flori\OneDrive\Desktop\SoupMate\.venv\Scripts\Activate.ps1"
 # python etl_soupmate_import.py
 
-
-
-import os, hashlib, time
+import os, time, hashlib
 from datetime import datetime
 from typing import List, Dict, Any
 
 import requests
-import psycopg2
-from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
-# ---- .env laden und Variablen holen (genau in dieser Reihenfolge) ----
-load_dotenv()  # sucht automatisch .env im aktuellen Ordner
-PG_DSN = os.environ.get("PG_DSN")
-API_KEY = os.environ.get("SPOONACULAR_API_KEY")
+# =========================
+#   ENV laden & prüfen
+# =========================
+load_dotenv()  # .env im aktuellen Ordner
+SUPABASE_URL         = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_SECRET_KEY  = os.environ.get("SUPABASE_SECRET_KEY")
+SPOONACULAR_API_KEY  = os.environ.get("SPOONACULAR_API_KEY")
 
-print("PG_DSN =", PG_DSN)  # Debug-Ausgabe, um zu sehen, was wirklich gelesen wird
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL fehlt in .env")
+if not SUPABASE_SECRET_KEY:
+    raise RuntimeError("SUPABASE_SECRET_KEY fehlt in .env (Secret/Service Role Key)")
+if not SPOONACULAR_API_KEY:
+    raise RuntimeError("SPOONACULAR_API_KEY fehlt in .env")
 
-if not PG_DSN:
-    raise RuntimeError("PG_DSN fehlt. Liegt die .env im selben Ordner und heißt exakt '.env'?")
-if not API_KEY:
-    raise RuntimeError("SPOONACULAR_API_KEY fehlt in .env.")
+print("Using:", SUPABASE_URL)
 
-# ---------- Hilfsfunktionen ----------
+# =========================
+#   HTTP-Clients
+# =========================
+# Supabase REST
+SB_HEADERS = {
+    "apikey": SUPABASE_SECRET_KEY,
+    "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
+    "Content-Type": "application/json",
+}
+
+def sb_get(table: str, params: Dict[str, Any]):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def sb_insert(table: str, rows: List[Dict[str, Any]]):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, json=rows, timeout=30)
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+def sb_upsert(table: str, rows: List[Dict[str, Any]], on_conflict: str | None = None):
+    params = {}
+    if on_conflict:
+        params["on_conflict"] = on_conflict
+    headers = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates"}
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=headers, params=params, json=rows, timeout=30)
+    r.raise_for_status()
+    return r.json() if r.text else None
+
+# Spoonacular
+BASE = "https://api.spoonacular.com"
+def spoonacular_get(path: str, params: Dict[str, Any]):
+    params = dict(params or {})
+    headers = {"x-api-key": SPOONACULAR_API_KEY}  # stabiler als ?apiKey=
+    r = requests.get(f"{BASE}{path}", params=params, headers=headers, timeout=30)
+    if r.status_code == 402:
+        raise RuntimeError("Spoonacular: Payment Required / Quota exceeded.")
+    r.raise_for_status()
+    return r.json()
+
+def fetch_soups_page(limit=50, offset=0):
+    data = spoonacular_get(
+        "/recipes/complexSearch",
+        {
+            "query": "soup",
+            "number": limit,
+            "offset": offset,
+            "addRecipeInformation": "true",
+            "instructionsRequired": "true",
+            "sort": "popularity",
+        },
+    )
+    return data.get("results", [])
+
+# =========================
+#   Helper (Text/Chunks)
+# =========================
 def norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
@@ -53,56 +110,31 @@ def split_instructions(instr: str, max_len=1000):
         chunks.append(cur)
     return chunks or [instr[:max_len]]
 
-# ---------- API ----------
-BASE = "https://api.spoonacular.com"
+# =========================
+#   REST-ETL-Schritte
+# =========================
+def ensure_source_rest(name: str) -> str:
+    # Upsert by unique(name)
+    sb_upsert("source", [{"name": name}], on_conflict="name")
+    rows = sb_get("source", {"select": "id", "name": f"eq.{name}", "limit": 1})
+    return rows[0]["id"]
 
-def spoonacular_get(path: str, params: Dict[str, Any]):
-    params = dict(params or {})
-    params["apiKey"] = API_KEY
-    r = requests.get(f"{BASE}{path}", params=params, timeout=30)
-    if r.status_code == 402:
-        raise RuntimeError("Spoonacular: Payment Required / Quota exceeded.")
-    r.raise_for_status()
-    return r.json()
-
-def fetch_soups_page(limit=50, offset=0):
-    # Complex Search: liefert bereits viele Felder
-    return spoonacular_get(
-        "/recipes/complexSearch",
-        {
-            "query": "soup",
-            "number": limit,
-            "offset": offset,
-            "addRecipeInformation": "true",
-            "instructionsRequired": "true",
-            "sort": "popularity",
-        },
-    ).get("results", [])
-
-# ---------- DB I/O ----------
-def ensure_source(conn, name: str):
-    with conn.cursor() as cur:
-        cur.execute("insert into public.source(name) values (%s) on conflict(name) do nothing;", (name,))
-        cur.execute("select id from public.source where name=%s;", (name,))
-        return cur.fetchone()[0]
-
-def upsert_recipe(conn, src_id, src_recipe):
+def upsert_recipe_rest(src_id: str, src_recipe: Dict[str, Any]):
     title = src_recipe.get("title") or "Untitled"
     summary = src_recipe.get("summary")
-    instructions_raw = src_recipe.get("instructions") or summary
-    instructions_plain = src_recipe.get("instructions") or summary
+    instructions = src_recipe.get("instructions") or summary
     servings = src_recipe.get("servings")
     ready_in = src_recipe.get("readyInMinutes")
     image = src_recipe.get("image")
     cuisines = src_recipe.get("cuisines") or []
     diets = src_recipe.get("diets") or []
 
-    ingredients_text = []
-    ingredients_struct = []
+    ingredients_text: List[str] = []
+    items: List[Dict[str, Any]] = []
     for ing in (src_recipe.get("extendedIngredients") or []):
         original = ing.get("original") or ing.get("originalName") or ing.get("name", "")
         ingredients_text.append(original)
-        ingredients_struct.append({
+        items.append({
             "name": ing.get("name") or "",
             "amount": ing.get("amount"),
             "unit": ing.get("unit"),
@@ -111,136 +143,129 @@ def upsert_recipe(conn, src_id, src_recipe):
         })
 
     signature = make_signature(title, ingredients_text)
+    body = [{
+        "source_id": src_id,
+        "source_recipe_id": str(src_recipe.get("id")),
+        "title": title,
+        "summary": summary,
+        "instructions_raw": instructions,
+        "instructions_plain": instructions,
+        "servings": servings,
+        "total_time_minutes": ready_in,
+        "image_url": image,
+        "cuisine": cuisines,
+        "diets": diets,
+        "intolerances": [],
+        "lang": "de",
+        "is_soup": True,
+        "last_fetched_at": datetime.utcnow().isoformat(),
+        "signature": signature,
+    }]
+    sb_upsert("recipe", body, on_conflict="source_id,source_recipe_id")
+    rid = sb_get("recipe", {
+        "select": "id",
+        "source_id": f"eq.{src_id}",
+        "source_recipe_id": f"eq.{str(src_recipe.get('id'))}",
+        "limit": 1
+    })[0]["id"]
+    return rid, items, ingredients_text, title, instructions
 
-    with conn.cursor() as cur:
-        cur.execute("""
-        insert into public.recipe (
-          source_id, source_recipe_id, title, summary, instructions_raw, instructions_plain,
-          servings, total_time_minutes, image_url, cuisine, diets, intolerances,
-          lang, is_soup, last_fetched_at, signature
-        )
-        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::text[],%s::text[],%s::text[],%s,%s,%s,%s)
-        on conflict (source_id, source_recipe_id) do update set
-          title=excluded.title,
-          summary=excluded.summary,
-          instructions_raw=excluded.instructions_raw,
-          instructions_plain=excluded.instructions_plain,
-          servings=excluded.servings,
-          total_time_minutes=excluded.total_time_minutes,
-          image_url=excluded.image_url,
-          cuisine=excluded.cuisine,
-          diets=excluded.diets,
-          intolerances=excluded.intolerances,
-          lang=excluded.lang,
-          is_soup=excluded.is_soup,
-          last_fetched_at=excluded.last_fetched_at,
-          signature=excluded.signature,
-          updated_at=now()
-        returning id
-        """, (
-            src_id, str(src_recipe.get("id")),
-            title, summary, instructions_raw, instructions_plain,
-            src_recipe.get("servings"), ready_in, image,
-            cuisines, diets, [],  # intolerances lassen wir leer
-            "de", True, datetime.utcnow(), signature
-        ))
-        recipe_id = cur.fetchone()[0]
+def upsert_ingredients_and_join_rest(recipe_id: str, items: List[Dict[str, Any]]):
+    names = sorted({norm(it.get("name") or "") for it in items if it.get("name")})
+    names = [n for n in names if n]  # ohne Leerstrings
+    if not names:
+        return
+    # Zutatenstamm upserten (unique name)
+    sb_upsert("ingredient", [{"name": n} for n in names], on_conflict="name")
 
-    return recipe_id, ingredients_struct, ingredients_text, title, instructions_plain
+    # IDs in einem Rutsch holen – PostgREST in.(a,b,c)
+    in_list = ",".join(names)
+    data = sb_get("ingredient", {"select": "id,name", "name": f"in.({in_list})"})
+    id_map = {row["name"]: row["id"] for row in data}
 
-def upsert_ingredients_and_join(conn, recipe_id, items):
-    unique_names = list({norm(i["name"]) for i in items if i.get("name")})
-    if unique_names:
-        with conn.cursor() as cur:
-            execute_values(cur,
-                "insert into public.ingredient(name) values %s on conflict(name) do nothing;",
-                [(n,) for n in unique_names]
-            )
-            cur.execute("select id, name from public.ingredient where name = any(%s);", (unique_names,))
-            id_map = {name: iid for (iid, name) in cur.fetchall()}
+    rows = []
+    for it in items:
+        n = norm(it.get("name") or "")
+        if not n or n not in id_map:
+            continue
+        rows.append({
+            "recipe_id": recipe_id,
+            "ingredient_id": id_map[n],
+            "quantity": it.get("amount"),
+            "unit": it.get("unit"),
+            "quantity_gram": it.get("grams"),
+            "note": it.get("note") or ""
+        })
+    if rows:
+        sb_upsert("recipe_ingredient", rows, on_conflict="recipe_id,ingredient_id,unit,note")
 
-            rows = []
-            for it in items:
-                n = norm(it["name"] or "")
-                if not n:
-                    continue
-                iid = id_map[n]
-                rows.append((recipe_id, iid, it.get("amount"), it.get("unit"), it.get("grams"), it.get("note") or ""))
-
-            if rows:
-                execute_values(cur, """
-                    insert into public.recipe_ingredient
-                      (recipe_id, ingredient_id, quantity, unit, quantity_gram, note)
-                    values %s
-                    on conflict (recipe_id, ingredient_id, unit, note) do update set
-                      quantity = excluded.quantity,
-                      quantity_gram = excluded.quantity_gram
-                """, rows)
-
-def upsert_nutrition(conn, recipe_id, src_recipe):
-    nutrition = src_recipe.get("nutrition") or {}
-    nutrients = nutrition.get("nutrients") or []
+def upsert_nutrition_rest(recipe_id: str, src_recipe: Dict[str, Any]):
+    nutrients = (src_recipe.get("nutrition") or {}).get("nutrients") or []
     byname = {norm(n.get("name","")): n for n in nutrients}
-    kcal     = (byname.get("calories") or {}).get("amount")
-    protein  = (byname.get("protein") or {}).get("amount")
-    carbs    = (byname.get("carbohydrates") or byname.get("carbs") or {}).get("amount")
-    fat      = (byname.get("fat") or {}).get("amount")
-    fiber    = (byname.get("fiber") or {}).get("amount")
-    sugar    = (byname.get("sugar") or {}).get("amount")
-    sodium   = (byname.get("sodium") or {}).get("amount")
+    def amt(key: str):
+        return (byname.get(key) or {}).get("amount")
+    row = {
+        "recipe_id": recipe_id,
+        "kcal":       amt("calories"),
+        "protein_g":  amt("protein"),
+        "carbs_g":    amt("carbohydrates") or amt("carbs"),
+        "fat_g":      amt("fat"),
+        "fiber_g":    amt("fiber"),
+        "sugar_g":    amt("sugar"),
+        "sodium_mg":  amt("sodium"),
+    }
+    sb_upsert("nutrition", [row], on_conflict="recipe_id")
 
-    with conn.cursor() as cur:
-        cur.execute("""
-        insert into public.nutrition (recipe_id, kcal, protein_g, carbs_g, fat_g, fiber_g, sugar_g, sodium_mg)
-        values (%s,%s,%s,%s,%s,%s,%s,%s)
-        on conflict (recipe_id) do update set
-          kcal=excluded.kcal, protein_g=excluded.protein_g, carbs_g=excluded.carbs_g,
-          fat_g=excluded.fat_g, fiber_g=excluded.fiber_g, sugar_g=excluded.sugar_g, sodium_mg=excluded.sodium_mg
-        """, (recipe_id, kcal, protein, carbs, fat, fiber, sugar, sodium))
-
-def insert_chunks(conn, recipe_id, title, ingredients_text, instructions_plain):
-    chunks = []
-    chunks.append(("title", title, len(title.split())))
-    ing_text = chunk_ingredients(ingredients_text)
-    chunks.append(("ingredients", ing_text, len(ing_text.split())))
+def insert_chunks_rest(recipe_id: str, title: str, ingredients_text: List[str], instructions_plain: str | None):
+    rows = []
+    rows.append({
+        "recipe_id": recipe_id,
+        "chunk_type": "title",
+        "content": title,
+        "token_count": len((title or "").split())
+    })
+    ing = chunk_ingredients(ingredients_text)
+    rows.append({
+        "recipe_id": recipe_id,
+        "chunk_type": "ingredients",
+        "content": ing,
+        "token_count": len(ing.split())
+    })
     for part in split_instructions(instructions_plain or ""):
-        chunks.append(("instructions", part, len(part.split())))
+        rows.append({
+            "recipe_id": recipe_id,
+            "chunk_type": "instructions",
+            "content": part,
+            "token_count": len(part.split())
+        })
+    if rows:
+        sb_insert("recipe_chunk", rows)
 
-    with conn.cursor() as cur:
-        execute_values(cur, """
-            insert into public.recipe_chunk (recipe_id, chunk_type, content, token_count)
-            values %s
-        """, [(recipe_id, t, c, tok) for (t, c, tok) in chunks])
+# =========================
+#   Import-Loop
+# =========================
+def import_soups(total=50, page_size=25, source_name="Spoonacular", sleep_s=1.2):
+    src_id = ensure_source_rest(source_name)
+    imported, offset = 0, 0
+    while imported < total:
+        batch = min(page_size, total - imported)
+        results = fetch_soups_page(limit=batch, offset=offset)
+        if not results:
+            break
+        for r in results:
+            rid, items, ingredients_text, title, instructions_plain = upsert_recipe_rest(src_id, r)
+            upsert_ingredients_and_join_rest(rid, items)
+            upsert_nutrition_rest(rid, r)
+            insert_chunks_rest(rid, title, ingredients_text, instructions_plain)
+        imported += len(results)
+        offset += len(results)
+        time.sleep(sleep_s)  # API freundlich bleiben
+        print(f"Imported {imported}/{total}")
+    print("Import fertig ✅")
 
-def import_soups(total=50, page_size=25, source_name="Spoonacular", sleep_s=1.0):
-    conn = psycopg2.connect(PG_DSN)
-    conn.autocommit = False
-    try:
-        src_id = ensure_source(conn, source_name)
-        imported = 0
-        offset = 0
-        while imported < total:
-            batch = min(page_size, total - imported)
-            results = fetch_soups_page(limit=batch, offset=offset)
-            if not results:
-                break
-            for r in results:
-                recipe_id, items, ingredients_text, title, instructions_plain = upsert_recipe(conn, src_id, r)
-                upsert_ingredients_and_join(conn, recipe_id, items)
-                upsert_nutrition(conn, recipe_id, r)
-                insert_chunks(conn, recipe_id, title, ingredients_text, instructions_plain)
-            conn.commit()
-            imported += len(results)
-            offset += len(results)
-            time.sleep(sleep_s)  # Rate-Limit freundlich
-            print(f"Imported {imported}/{total}")
-        print("Import fertig ✅")
-    except Exception as e:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
+# =========================
+#   Main
+# =========================
 if __name__ == "__main__":
-    # Erst mal klein testen:
+    # für den ersten Lauf klein halten
     import_soups(total=10, page_size=10)
