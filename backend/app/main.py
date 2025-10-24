@@ -42,20 +42,83 @@ def health():
 class ChatRequest(BaseModel):
     query: str
 
+def extract_keywords(prompt: str) -> list:
+    # Splitte den User-Prompt in einzelne Wörter
+    words = prompt.lower().split()
+    return words
 
-def search_recipes_in_db(query_embedding, topk=5):
-    # An die Supabase-RPC-Funktion search_recipes senden
-    search_url = f"{SUPABASE_URL}/rest/v1/rpc/search_recipes"
+
+def search_recipes_in_db(query_embedding, query_keywords=None, topk=5):
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/search_recipes_with_keywords"
+
     payload = {
         "query_embedding": query_embedding,
+        "query_keywords": query_keywords,
         "topk": topk
     }
 
-    response = requests.post(search_url, headers=SB_HEADERS, json=payload)
-    response.raise_for_status()
+    try:
+        response = requests.post(rpc_url, headers=SB_HEADERS, json=payload)
+        response.raise_for_status()
 
-    # Rückgabe der besten Rezepte
-    return response.json()
+        # Überprüfe, ob die Antwort Ergebnisse enthält
+        if response.json():
+            return response.json()
+        else:
+            print("Keine ähnlichen Rezepte gefunden.")
+            return []
+
+    except requests.exceptions.RequestException as e:
+        print(f"Fehler bei der Supabase-Anfrage: {e}")
+        return []
+
+
+
+def sb_get(table: str, params: dict, timeout=30):
+    """
+    Führt eine GET-Anfrage an die Supabase-API aus, um Daten aus der angegebenen Tabelle abzurufen.
+    """
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        response = requests.get(url, headers=SB_HEADERS, params=params, timeout=timeout)
+        response.raise_for_status()
+
+        # Hier sicherstellen, dass die Antwort ein JSON-Dictionary ist
+        print("Antwort von Supabase:", response.json())  # Debugging: Antwort anzeigen
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        print(f"Fehler bei der Supabase-Anfrage: {e}")
+        return []  # Bei Fehler eine leere Liste zurückgeben
+
+
+
+
+STOPWORDS = {"und", "mit", "für", "ein", "eine", "der", "die", "das", "in", "auf"}
+def fetch_keywords_from_db():
+    # Hole alle Rezeptnamen und Inhalte aus der Supabase-Datenbank
+    params = {"select": "title, content"}
+    recipes = sb_get("recipe", params)
+
+    keywords = []
+    for recipe in recipes:
+        # Stelle sicher, dass die 'recipe' Daten das richtige Dictionary sind
+        title = recipe.get("title", "").lower()  # Hier funktioniert get()
+        content = recipe.get("content", "").lower()
+
+        # Füge Schlüsselwörter aus dem Rezeptnamen hinzu
+        keywords.extend(title.split())
+
+        # Füge Schlüsselwörter aus dem Inhalt hinzu
+        keywords.extend(content.split())
+
+    # Entferne Duplikate
+    keywords = list(set(keywords))
+
+    return keywords
+
+
+
 
 
 @app.post("/api/chat")
@@ -63,12 +126,28 @@ def chat(req: ChatRequest):
     # Generiere das Embedding des User-Prompts
     query_embedding = model.encode(req.query, convert_to_tensor=True).cpu().tolist()
 
-    # API-Call zu Supabase, um nach ähnlichen Rezepten zu suchen
-    search_results = search_recipes_in_db(query_embedding)
+    # Extrahiere die Keywords aus dem User-Prompt (z. B. "beef", "potatoes")
+    query_keywords = extract_keywords(req.query)
+    print("Extrahierte Keywords:", query_keywords)  # Debugging: Zeige extrahierte Keywords
 
-    # Extrahiere und formatiere die besten Rezepte
+    # Hole alle Keywords aus der Rezeptdatenbank
+    db_keywords = fetch_keywords_from_db()
+    print("Keywords aus der Datenbank:", db_keywords)  # Debugging: Zeige Datenbank-Keywords
+
+    # Kombiniere die Keywords aus der Rezeptdatenbank und dem User-Prompt
+    all_keywords = list(set(query_keywords + db_keywords))
+
+    # API-Call zu Supabase, um nach ähnlichen Rezepten zu suchen
+    search_results = search_recipes_in_db(query_embedding, query_keywords=all_keywords)
+
+    # Extrahiere die Titel der gefundenen Rezepte
     similar_recipes = [result["title"] for result in search_results]
+    print("Gefundene Rezepte:", similar_recipes)  # Debugging: Zeige die gefundenen Rezepte
 
     return {"answer": f"Du hast gefragt: '{req.query}'. Ähnliche Rezepte: {', '.join(similar_recipes)}"}
+
+
+
+
 
 
