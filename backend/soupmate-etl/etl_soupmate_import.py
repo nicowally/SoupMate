@@ -3,21 +3,28 @@
 # & "C:\Users\flori\OneDrive\Desktop\SoupMate\.venv\Scripts\Activate.ps1"
 # python etl_soupmate_import.py
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
+print(os.getenv("SUPABASE_URL"))
+print(os.getenv("SUPABASE_SECRET_KEY"))
+print(os.getenv("SPOONACULAR_API_KEY"))
+
 import re
 import time
 import hashlib
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
-import requests
-from dotenv import load_dotenv
+import os, requests
+from sentence_transformers import SentenceTransformer
 
 # =========================
 #   ENV laden & prüfen
 # =========================
 load_dotenv()  # .env im aktuellen Ordner
-SUPABASE_URL        = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 SPOONACULAR_API_KEY = os.environ.get("SPOONACULAR_API_KEY")
 
@@ -40,15 +47,18 @@ SB_HEADERS = {
     "Content-Type": "application/json",
 }
 
+
 def sb_get(table: str, params: Dict[str, Any], timeout=30):
     r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
+
 def sb_insert(table: str, rows: List[Dict[str, Any]], timeout=30):
     r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, json=rows, timeout=timeout)
     r.raise_for_status()
     return r.json() if r.text else None
+
 
 def sb_upsert(table: str, rows: List[Dict[str, Any]], on_conflict: Optional[str] = None, timeout=30):
     params = {}
@@ -59,8 +69,10 @@ def sb_upsert(table: str, rows: List[Dict[str, Any]], on_conflict: Optional[str]
     r.raise_for_status()
     return r.json() if r.text else None
 
+
 # Spoonacular
 BASE = "https://api.spoonacular.com"
+
 
 def spoonacular_get(path: str, params: Dict[str, Any], timeout=30):
     params = dict(params or {})
@@ -78,11 +90,13 @@ def spoonacular_get(path: str, params: Dict[str, Any], timeout=30):
     r.raise_for_status()
     return r.json()
 
+
 # =========================
 #   Helper (Text/Chunks)
 # =========================
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
+
 
 def html_to_text(s: Optional[str]) -> str:
     if not s:
@@ -91,15 +105,19 @@ def html_to_text(s: Optional[str]) -> str:
     s = WS_RE.sub(" ", s).strip()
     return s
 
+
 def norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
+
 
 def make_signature(title: str, ingredients_list_text: List[str]) -> str:
     base = norm(title) + "|" + "|".join(sorted(norm(x) for x in ingredients_list_text))
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
+
 def chunk_ingredients(ingredients_list_text: List[str]) -> str:
     return "\n".join(f"- {line}" for line in ingredients_list_text if line and line.strip())
+
 
 def split_instructions(instr: str, max_len=1000):
     if not instr:
@@ -118,6 +136,7 @@ def split_instructions(instr: str, max_len=1000):
         chunks.append(cur)
     return chunks or [instr[:max_len]]
 
+
 # =========================
 #   Spoonacular Calls
 # =========================
@@ -129,7 +148,7 @@ def fetch_soups_page(limit=50, offset=0):
         "/recipes/complexSearch",
         {
             "query": "soup",
-            "type": "soup",                 # härterer Filter
+            "type": "soup",  # härterer Filter
             "number": limit,
             "offset": offset,
             "addRecipeInformation": "true",
@@ -139,14 +158,18 @@ def fetch_soups_page(limit=50, offset=0):
     )
     return data.get("results", [])
 
+
 def fetch_ingredient_widget(recipe_id: int):
     return spoonacular_get(f"/recipes/{recipe_id}/ingredientWidget.json", {})
+
 
 def fetch_nutrition_widget(recipe_id: int):
     return spoonacular_get(f"/recipes/{recipe_id}/nutritionWidget.json", {})
 
+
 def fetch_price_breakdown(recipe_id: int):
     return spoonacular_get(f"/recipes/{recipe_id}/priceBreakdownWidget.json", {})
+
 
 # =========================
 #   REST-ETL-Schritte
@@ -156,6 +179,7 @@ def ensure_source_rest(name: str) -> str:
     sb_upsert("source", [{"name": name}], on_conflict="name")
     rows = sb_get("source", {"select": "id", "name": f"eq.{name}", "limit": 1})
     return rows[0]["id"]
+
 
 def upsert_recipe_rest(src_id: str, src_recipe: Dict[str, Any]):
     title = src_recipe.get("title") or "Untitled"
@@ -198,7 +222,7 @@ def upsert_recipe_rest(src_id: str, src_recipe: Dict[str, Any]):
         "intolerances": [],
         "lang": "de",
         "is_soup": True,
-        #"last_fetched_at": datetime.utcnow().isoformat(),
+        # "last_fetched_at": datetime.utcnow().isoformat(),
         "last_fetched_at": datetime.now(timezone.utc).isoformat(),
         "signature": signature,
     }]
@@ -210,6 +234,7 @@ def upsert_recipe_rest(src_id: str, src_recipe: Dict[str, Any]):
         "limit": 1
     })[0]["id"]
     return rid, items, ingredients_text, title, instructions
+
 
 def upsert_ingredients_and_join_rest(recipe_id: str, items: List[Dict[str, Any]]):
     # Zutatenstamm upserten
@@ -242,22 +267,26 @@ def upsert_ingredients_and_join_rest(recipe_id: str, items: List[Dict[str, Any]]
     if rows_join:
         sb_upsert("recipe_ingredient", rows_join, on_conflict="recipe_id,ingredient_id,unit,note")
 
+
 def upsert_nutrition_rest(recipe_id: str, src_recipe: Dict[str, Any]):
     nutrients = (src_recipe.get("nutrition") or {}).get("nutrients") or []
-    byname = {norm(n.get("name","")): n for n in nutrients}
+    byname = {norm(n.get("name", "")): n for n in nutrients}
+
     def amt(key: str):
         return (byname.get(key) or {}).get("amount")
+
     row = {
         "recipe_id": recipe_id,
-        "kcal":       amt("calories"),
-        "protein_g":  amt("protein"),
-        "carbs_g":    amt("carbohydrates") or amt("carbs"),
-        "fat_g":      amt("fat"),
-        "fiber_g":    amt("fiber"),
-        "sugar_g":    amt("sugar"),
-        "sodium_mg":  amt("sodium"),
+        "kcal": amt("calories"),
+        "protein_g": amt("protein"),
+        "carbs_g": amt("carbohydrates") or amt("carbs"),
+        "fat_g": amt("fat"),
+        "fiber_g": amt("fiber"),
+        "sugar_g": amt("sugar"),
+        "sodium_mg": amt("sodium"),
     }
     sb_upsert("nutrition", [row], on_conflict="recipe_id")
+
 
 def upsert_price_breakdown_rest(recipe_uuid: str, price_json: dict):
     """
@@ -277,7 +306,7 @@ def upsert_price_breakdown_rest(recipe_uuid: str, price_json: dict):
     """
     ingredients = price_json.get("ingredients") or []
     total_cents = price_json.get("totalCost") or 0
-    servings    = price_json.get("servings") or 1
+    servings = price_json.get("servings") or 1
     per_serv_cents = int(round(float(total_cents) / max(int(servings), 1)))
 
     # Aggregat speichern
@@ -292,7 +321,7 @@ def upsert_price_breakdown_rest(recipe_uuid: str, price_json: dict):
     def read_metric_amount(ing: dict):
         """Robuster Parser für amount.metric."""
         amt = (ing.get("amount") or {}).get("metric") or {}
-        if isinstance(amt, (int, float)):   # falls mal direkt eine Zahl
+        if isinstance(amt, (int, float)):  # falls mal direkt eine Zahl
             return float(amt), None
         return amt.get("value"), amt.get("unit")
 
@@ -311,7 +340,7 @@ def upsert_price_breakdown_rest(recipe_uuid: str, price_json: dict):
         if not name:
             continue
         amount, unit = read_metric_amount(ing)
-        price_cents  = read_price_cents(ing)
+        price_cents = read_price_cents(ing)
         rows.append({
             "recipe_id": recipe_uuid,
             "name": name,
@@ -332,6 +361,7 @@ def upsert_recipe_raw_rest(recipe_uuid: str, complex_json: dict, ing_json: dict,
         "nutrition_widget": nut_json,
         "price_widget": price_json
     }], on_conflict="recipe_id")
+
 
 def insert_chunks_rest(recipe_id: str, title: str, ingredients_text: List[str], instructions_plain: str):
     rows = []
@@ -360,6 +390,7 @@ def insert_chunks_rest(recipe_id: str, title: str, ingredients_text: List[str], 
         })
     if rows:
         sb_insert("recipe_chunk", rows)
+
 
 def insert_price_chunk_rest(recipe_uuid: str, price_json: dict):
     total = price_json.get("totalCost") or 0
@@ -399,6 +430,7 @@ def insert_price_chunk_rest(recipe_uuid: str, price_json: dict):
         "token_count": len(content.split())
     }])
 
+
 # =========================
 #   Import-Loop
 # =========================
@@ -436,10 +468,10 @@ def import_soups(total=50, page_size=25, source_name="Spoonacular", sleep_s=1.2)
                 pric = {}
 
             # speichern
-            upsert_ingredients_and_join_rest(rid, items)   # aus complexSearch
-            upsert_nutrition_rest(rid, r)                  # aus complexSearch (Basis)
+            upsert_ingredients_and_join_rest(rid, items)  # aus complexSearch
+            upsert_nutrition_rest(rid, r)  # aus complexSearch (Basis)
             if pric:
-                upsert_price_breakdown_rest(rid, pric)     # Preis
+                upsert_price_breakdown_rest(rid, pric)  # Preis
             # Roh-JSON (optional, aber praktisch für Debug)
             try:
                 upsert_recipe_raw_rest(rid, r, ingw, nutw, pric)
@@ -459,9 +491,79 @@ def import_soups(total=50, page_size=25, source_name="Spoonacular", sleep_s=1.2)
         print(f"Imported {imported}/{total}")
     print("Import fertig ✅")
 
+
 # =========================
 #   Main
 # =========================
 if __name__ == "__main__":
     # Für den ersten Lauf eher klein halten, um Quota zu sparen
     import_soups(total=10, page_size=10)
+
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
+
+SB_HEADERS = {
+    "apikey": SUPABASE_SECRET_KEY,
+    "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
+    "Content-Type": "application/json",
+}
+
+# 384-dim kostenloses Embedding
+_model = None
+
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return _model
+
+
+# =========================
+#   384-dim kostenloses Embedding
+# =========================
+_model = None
+
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return _model
+
+
+def backfill_recipe_chunk_embeddings(batch=500):
+    url = f"{SUPABASE_URL}/rest/v1/recipe_chunk"
+    r = requests.get(url, headers=SB_HEADERS, params={
+        "select": "id,content",
+        "embedding": "is.null",
+        "limit": batch
+    }, timeout=60)
+    r.raise_for_status()
+    rows = r.json()
+
+    if not rows:
+        print("Nothing to embed.")
+        return
+
+    texts = [row["content"] or "" for row in rows]
+    model = get_model()
+    vectors = model.encode(texts, batch_size=64, normalize_embeddings=True).tolist()
+
+    # Embeddings in der Supabase-Datenbank updaten
+    for row, vec in zip(rows, vectors):
+        pr = requests.patch(
+            url,
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            params={"id": f"eq.{row['id']}"},
+            json={"embedding": vec},
+            timeout=60
+        )
+        pr.raise_for_status()
+
+    print(f"Embedded {len(rows)} chunks.")
+
+
+if __name__ == "__main__":
+    # Hier ruft das Skript die Funktion zum Embedding auf
+    backfill_recipe_chunk_embeddings(batch=500)
