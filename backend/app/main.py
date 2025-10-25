@@ -173,7 +173,7 @@ def chat(req: ChatRequest):
 
     # Kombiniere alles in einer Antwort
     return {
-        "answer": f"Du hast gefragt: '{req.query}'. Ähnliche Rezepte: '{similar_recipes_text}'. \n Instructions: \n'{instructions_text_combined}"
+        "answer": f"Du hast gefragt: '{req.query}'. Ähnliche Rezepte: '{similar_recipes_text}'. \n\n Instructions: '{instructions_text_combined}" #backslash funktioniert nicht, vielleicht problem bei frontend
     }
 
 
