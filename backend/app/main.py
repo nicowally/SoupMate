@@ -13,8 +13,8 @@ print("SUPABASE_URL:", os.getenv("SUPABASE_URL"))
 print("SUPABASE_SECRET_KEY:", os.getenv("SUPABASE_SECRET_KEY"))
 print("SPOONACULAR_API_KEY:", os.getenv("SPOONACULAR_API_KEY"))
 
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
+SUPABASE_URL = "https://brssalvqnbxgaiwmycpf.supabase.co"
+SUPABASE_SECRET_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJyc3NhbHZxbmJ4Z2Fpd215Y3BmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MTE0OTU1MywiZXhwIjoyMDc2NzI1NTUzfQ.LOtZiPf1bx9ZV5CpEeG03Mlli-FoDIrIOcnX4Qz9Asc"
 
 SB_HEADERS = {
     "apikey": SUPABASE_SECRET_KEY,
@@ -73,14 +73,14 @@ def search_recipes_in_db(query_embedding, query_keywords=None, topk=5):
         return []
 
 
-
 def sb_get(table: str, params: dict, timeout=30):
     """
     Führt eine GET-Anfrage an die Supabase-API aus, um Daten aus der angegebenen Tabelle abzurufen.
     """
     try:
-        url = f"{SUPABASE_URL}/rest/v1/{table}"
-        response = requests.get(url, headers=SB_HEADERS, params=params, timeout=timeout)
+        url = f"{SUPABASE_URL}/rest/v1/{table}?apikey={SUPABASE_SECRET_KEY}"
+        response = requests.get(url, headers={"Content-Type": "application/json"}, params=params, timeout=timeout)
+
         response.raise_for_status()
 
         # Hier sicherstellen, dass die Antwort ein JSON-Dictionary ist
@@ -97,20 +97,20 @@ def sb_get(table: str, params: dict, timeout=30):
 STOPWORDS = {"und", "mit", "für", "ein", "eine", "der", "die", "das", "in", "auf"}
 def fetch_keywords_from_db():
     # Hole alle Rezeptnamen und Inhalte aus der Supabase-Datenbank
-    params = {"select": "title, content"}
+    params = {"select": "title, instructions_raw"}  # Ändere 'content' zu 'instructions_raw'
     recipes = sb_get("recipe", params)
 
     keywords = []
     for recipe in recipes:
         # Stelle sicher, dass die 'recipe' Daten das richtige Dictionary sind
         title = recipe.get("title", "").lower()  # Hier funktioniert get()
-        content = recipe.get("content", "").lower()
+        instructions_raw = recipe.get("instructions_raw", "").lower()  # Hier 'instructions_raw' verwenden
 
         # Füge Schlüsselwörter aus dem Rezeptnamen hinzu
         keywords.extend(title.split())
 
-        # Füge Schlüsselwörter aus dem Inhalt hinzu
-        keywords.extend(content.split())
+        # Füge Schlüsselwörter aus den Zubereitungsanweisungen hinzu
+        keywords.extend(instructions_raw.split())
 
     # Entferne Duplikate
     keywords = list(set(keywords))
@@ -118,33 +118,63 @@ def fetch_keywords_from_db():
     return keywords
 
 
-
-
-
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     # Generiere das Embedding des User-Prompts
     query_embedding = model.encode(req.query, convert_to_tensor=True).cpu().tolist()
 
-    # Extrahiere die Keywords aus dem User-Prompt (z. B. "beef", "potatoes")
+    # Extrahiere die Keywords aus dem User-Prompt
     query_keywords = extract_keywords(req.query)
-    print("Extrahierte Keywords:", query_keywords)  # Debugging: Zeige extrahierte Keywords
 
     # Hole alle Keywords aus der Rezeptdatenbank
     db_keywords = fetch_keywords_from_db()
-    print("Keywords aus der Datenbank:", db_keywords)  # Debugging: Zeige Datenbank-Keywords
+    print("Keywords aus der Datenbank:", db_keywords)  # Debugging: Zeige die Keywords aus der DB
 
     # Kombiniere die Keywords aus der Rezeptdatenbank und dem User-Prompt
     all_keywords = list(set(query_keywords + db_keywords))
 
     # API-Call zu Supabase, um nach ähnlichen Rezepten zu suchen
     search_results = search_recipes_in_db(query_embedding, query_keywords=all_keywords)
+    print("Suchergebnisse:", search_results)  # Debugging: Zeige die Ergebnisse der Rezept-Suche
 
-    # Extrahiere die Titel der gefundenen Rezepte
-    similar_recipes = [result["title"] for result in search_results]
-    print("Gefundene Rezepte:", similar_recipes)  # Debugging: Zeige die gefundenen Rezepte
+    similar_recipes = []
+    instructions_text = []  # Liste, um alle Anweisungen zu speichern
+    for result in search_results:
+        recipe_id = result.get("recipe_id")  # Rezept ID erhalten
+        print(f"Verarbeite Rezept mit ID: {recipe_id}")  # Debugging: Zeige die ID des Rezepts
 
-    return {"answer": f"Du hast gefragt: '{req.query}'. Ähnliche Rezepte: {', '.join(similar_recipes)}"}
+        if recipe_id:  # Überprüfe, ob die ID vorhanden ist
+            # Führe die Abfrage durch, um 'title' und 'instructions_raw' direkt aus der 'recipe' Tabelle zu holen
+            rows = sb_get("recipe", {
+                "select": "id, title, instructions_raw",  # Hole 'title' und 'instructions_raw' aus der 'recipe'-Tabelle
+                "id": f"eq.{recipe_id}",  # Überprüfe die ID in der 'recipe'-Tabelle
+                "limit": 1  # Nur das erste Ergebnis
+            })
+
+            print(f"Supabase Antwort für Rezept ID {recipe_id}: {rows}")  # Debugging: Antwort von Supabase
+
+            if rows:
+                recipe = rows[0]  # Das erste Rezept in der Antwort
+                title = recipe["title"]
+                instructions_raw = recipe["instructions_raw"]  # Zubereitungsanweisung speichern
+
+                # Füge das Rezept zur Liste hinzu, wenn sowohl Titel als auch Zubereitungsanweisung vorhanden sind
+                if title and instructions_raw:
+                    similar_recipes.append(title)  # Nur den Titel hinzufügen
+                    instructions_text.append(instructions_raw)  # Zubereitungsanweisung zu der Liste hinzufügen
+                else:
+                    print(f"Kein Titel oder Anweisungen für Rezept ID {recipe_id}")  # Debugging: Kein Titel/Anweisung gefunden
+            else:
+                print(f"Kein Rezept gefunden für ID: {recipe_id}")  # Debugging: Keine Ergebnisse gefunden
+
+    # Kombiniere die ähnlichen Rezepte und Zubereitungsanweisungen
+    similar_recipes_text = ', '.join(similar_recipes)  # Titel der Rezepte als kommagetrennte Liste
+    instructions_text_combined = '\n\n'.join(instructions_text)  # Zubereitungsanweisungen als separater Block
+
+    # Kombiniere alles in einer Antwort
+    return {
+        "answer": f"Du hast gefragt: '{req.query}'. Ähnliche Rezepte: '{similar_recipes_text}'. \n Instructions: \n'{instructions_text_combined}"
+    }
 
 
 
